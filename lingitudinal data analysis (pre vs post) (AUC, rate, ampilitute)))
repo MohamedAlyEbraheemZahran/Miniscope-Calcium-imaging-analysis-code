@@ -5,8 +5,8 @@ import glob
 from scipy.signal import find_peaks
 
 # ---- SETTINGS ----
-folder_path = r"F:\inscopix_SOMcre\CSV files\longtidunal analysis  pre  and acute\new\time"
-t_min, t_max = 0, 300     
+folder_path = r"file path"
+t_min, t_max = 30, 300     
 duration = t_max - t_min    
 MAX_RISE_SECONDS = 3.0      
 MIN_PROMINENCE = 0.01   
