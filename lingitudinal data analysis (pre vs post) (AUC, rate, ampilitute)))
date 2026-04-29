@@ -1,191 +1,148 @@
 import pandas as pd
 import numpy as np
 import os
+import glob
 from scipy.signal import find_peaks
 
-# 1. Path to your Excel file
-file_path = r"F:\inscopix_SOMcre\CSV files\longtidunal analysis  pre  and acute\new\time\628_Longitudinal_PrevsAcute_cellset.xlsx"
-
-# ---- PARAMETERS ----
-t_min, t_max = 30, 300      # Analysis window in seconds
-duration = t_max - t_min    # 270 seconds
-MAX_RISE_SECONDS = 3.0      # Max rise time to consider for AUC (start to peak)
-MIN_PROMINENCE = 0.04       
-MIN_WIDTH = 3               
-# --------------------
+# ---- SETTINGS ----
+folder_path = r"F:\inscopix_SOMcre\CSV files\longtidunal analysis  pre  and acute\new\time"
+t_min, t_max = 0, 300     
+duration = t_max - t_min    
+MAX_RISE_SECONDS = 3.0      
+MIN_PROMINENCE = 0.01   
+MIN_WIDTH = 2               
+# ------------------
 
 def safe_rel_change(acute, pre):
-    """Calculates (acute - pre) / pre. Returns NaN if pre is 0 or NaN."""
-    if pre == 0 or np.isnan(pre):
-        return np.nan
+    if pre == 0 or np.isnan(pre): return np.nan
     return (acute - pre) / pre
 
 def analyze_session(signal, time_arr, fs):
-    """Calculates calcium metrics for a single trace window."""
     if np.all(np.isnan(signal)):
-        return {
-            "Peaks": 0, "Total_AUC": 0, "Mean_AUC": 0, 
-            "AUC_per_sec": 0, "Mean_Amp": 0, "Freq": 0
-        }
-    
+        return {"Peaks": 0, "Total_AUC": 0, "Mean_AUC": 0, "AUC_per_sec": 0, "Mean_Amp": 0, "Freq": 0}
     sig_clean = np.nan_to_num(signal, nan=0.0)
     peaks, _ = find_peaks(sig_clean, prominence=MIN_PROMINENCE, width=MIN_WIDTH)
-    
     max_idx = int(MAX_RISE_SECONDS * fs)
     auc_list, amp_list = [], []
-    
     for p in peaks:
-        # Trace back to the start of the rise (local minimum before peak)
         start = p
         while start > max(0, p - max_idx) and sig_clean[start-1] < sig_clean[start]:
             start -= 1
-        
-        # Calculate AUC and Amplitude for this specific event
         auc_list.append(np.trapz(sig_clean[start:p+1], time_arr[start:p+1]))
         amp_list.append(sig_clean[p])
-            
-    total_auc = sum(auc_list)
-    num_peaks = len(peaks)
-    
     return {
-        "Peaks": num_peaks,
-        "Total_AUC": total_auc,
+        "Peaks": len(peaks), "Total_AUC": sum(auc_list), 
         "Mean_AUC": np.mean(auc_list) if auc_list else 0,
-        "AUC_per_sec": total_auc / duration,
-        "Mean_Amp": np.mean(amp_list) if amp_list else 0,
-        "Freq": num_peaks / duration
+        "AUC_per_sec": sum(auc_list) / duration, "Mean_Amp": np.mean(amp_list) if amp_list else 0,
+        "Freq": len(peaks) / duration
     }
 
-# --- LOAD DATA ---
-print("Reading Excel sheets...")
-df_pre_raw = pd.read_excel(file_path, sheet_name='pre', header=None)
-df_acute_raw = pd.read_excel(file_path, sheet_name='acute', header=None)
+all_metrics_list = []
+all_summaries_list = []
 
-cell_names = [str(x).strip() for x in df_pre_raw.iloc[0, 1:].values]
-statuses = [str(x).strip() for x in df_pre_raw.iloc[1, 1:].values]
+files = glob.glob(os.path.join(folder_path, "*.xlsx"))
+print(f"Found {len(files)} files. Starting analysis...")
 
-# Extract time and data as numeric arrays
-time_pre = pd.to_numeric(df_pre_raw.iloc[2:, 0], errors='coerce').values
-data_pre = df_pre_raw.iloc[2:, 1:].apply(pd.to_numeric, errors='coerce').values
+for file in files:
+    file_name = os.path.basename(file)
+    print(f"Processing: {file_name}")
+    try:
+        df_pre_raw = pd.read_excel(file, sheet_name='pre', header=None)
+        df_acute_raw = pd.read_excel(file, sheet_name='acute', header=None)
+    except Exception as e:
+        print(f"  Error reading {file_name}: {e}")
+        continue
 
-time_acute = pd.to_numeric(df_acute_raw.iloc[2:, 0], errors='coerce').values
-data_acute = df_acute_raw.iloc[2:, 1:].apply(pd.to_numeric, errors='coerce').values
+    cell_names = [str(x).strip() for x in df_pre_raw.iloc[0, 1:].values]
+    statuses = [str(x).strip() for x in df_pre_raw.iloc[1, 1:].values]
+    time_pre = pd.to_numeric(df_pre_raw.iloc[2:, 0], errors='coerce').values
+    data_pre = df_pre_raw.iloc[2:, 1:].apply(pd.to_numeric, errors='coerce').values
+    time_acute = pd.to_numeric(df_acute_raw.iloc[2:, 0], errors='coerce').values
+    data_acute = df_acute_raw.iloc[2:, 1:].apply(pd.to_numeric, errors='coerce').values
 
-# Sampling rates and window masks
-fs_pre = 1 / np.nanmean(np.diff(time_pre))
-fs_acute = 1 / np.nanmean(np.diff(time_acute))
-mask_pre = (time_pre >= t_min) & (time_pre <= t_max)
-mask_acute = (time_acute >= t_min) & (time_acute <= t_max)
+    fs_pre = 1 / np.nanmean(np.diff(time_pre))
+    fs_acute = 1 / np.nanmean(np.diff(time_acute))
+    mask_pre, mask_acute = (time_pre >= t_min) & (time_pre <= t_max), (time_acute >= t_min) & (time_acute <= t_max)
 
-# --- PROCESS CELLS ---
-print("Calculating longitudinal metrics...")
-results = []
-for i, cell in enumerate(cell_names):
-    # Registration check (does the cell have data anywhere in the full trace?)
-    reg_pre = not np.all(np.isnan(data_pre[:, i]))
-    reg_acute = not np.all(np.isnan(data_acute[:, i]))
-    
-    # Calculate stats for the specified window (30-300s)
-    m_pre = analyze_session(data_pre[mask_pre, i], time_pre[mask_pre], fs_pre)
-    m_acute = analyze_session(data_acute[mask_acute, i], time_acute[mask_acute], fs_acute)
-    
-    results.append({
-        "Cell": cell, "Status": statuses[i],
-        "Registered_Pre": reg_pre, "Registered_Acute": reg_acute,
-        
-        # Total AUC
-        "Pre_Total_AUC": m_pre["Total_AUC"],
-        "Acute_Total_AUC": m_acute["Total_AUC"],
-        "Difference_Total_AUC(acute-pre)": m_acute["Total_AUC"] - m_pre["Total_AUC"],
-        "DF/F Total_AUC (acute-pre/pre)": safe_rel_change(m_acute["Total_AUC"], m_pre["Total_AUC"]),
-        
-        # Mean AUC
-        "Pre_mean_AUC": m_pre["Mean_AUC"],
-        "Acute_mean_AUC": m_acute["Mean_AUC"],
-        "Difference_mean_AUC(acute-pre)": m_acute["Mean_AUC"] - m_pre["Mean_AUC"],
-        "DF/F mean_AUC (acute-pre/pre)": safe_rel_change(m_acute["Mean_AUC"], m_pre["Mean_AUC"]),
-        
-        # AUC per second
-        "Pre_AUC_per_second": m_pre["AUC_per_sec"],
-        "Acute_AUC_per_second": m_acute["AUC_per_sec"],
-        "Difference_AUC_second(acute-pre)": m_acute["AUC_per_sec"] - m_pre["AUC_per_sec"],
-        "DF/F_AUC_per_second (acute-pre/pre)": safe_rel_change(m_acute["AUC_per_sec"], m_pre["AUC_per_sec"]),
-        
-        # Peaks count
-        "Pre_Peaks": m_pre["Peaks"],
-        "Acute_Peaks": m_acute["Peaks"],
-        "Difference_Peaks": m_acute["Peaks"] - m_pre["Peaks"],
-        "DF/F_Peaks": safe_rel_change(m_acute["Peaks"], m_pre["Peaks"]),
-        
-        # Frequency
-        "Pre_Peaks_frequencey": m_pre["Freq"],
-        "Acute_Peaks_frequencey": m_acute["Freq"],
-        "Difference_Peaks_frequencey": m_acute["Freq"] - m_pre["Freq"],
-        "DF/F_Peaks_frequencey": safe_rel_change(m_acute["Freq"], m_pre["Freq"]),
-        
-        # Amplitude
-        "Pre_amplitude": m_pre["Mean_Amp"],
-        "acute_amplitude": m_acute["Mean_Amp"],
-        "Difference_amplitude": m_acute["Mean_Amp"] - m_pre["Mean_Amp"],
-        "DF/F_amplitude": safe_rel_change(m_acute["Mean_Amp"], m_pre["Mean_Amp"])
-    })
+    file_results = []
+    for i, cell in enumerate(cell_names):
+        reg_pre, reg_acute = not np.all(np.isnan(data_pre[:, i])), not np.all(np.isnan(data_acute[:, i]))
+        m_pre, m_acute = analyze_session(data_pre[mask_pre, i], time_pre[mask_pre], fs_pre), analyze_session(data_acute[mask_acute, i], time_acute[mask_acute], fs_acute)
+        res = {"Source_File": file_name, "Cell": cell, "Status": statuses[i], "Registered_Pre": reg_pre, "Registered_Acute": reg_acute}
+        metric_map = {"Total_AUC": "Total_AUC", "mean_AUC": "Mean_AUC", "AUC_per_second": "AUC_per_sec", "Peaks": "Peaks", "Peaks_frequencey": "Freq", "amplitude": "Mean_Amp"}
+        for disp, key in metric_map.items():
+            res.update({f"Pre_{disp}": m_pre[key], f"Acute_{disp}": m_acute[key], f"Difference_{disp}": m_acute[key]-m_pre[key], f"DF/F_{disp}": safe_rel_change(m_acute[key], m_pre[key])})
+        file_results.append(res)
 
-df_metrics = pd.DataFrame(results)
+    df_file_metrics = pd.DataFrame(file_results)
+    all_metrics_list.append(df_file_metrics)
 
-# --- SUMMARY SHEET ---
-print("Generating summary data...")
-summary_rows = []
-total_all = len(df_metrics)
-n_pre_true = df_metrics['Registered_Pre'].sum()
-n_pre_false = total_all - n_pre_true
+    # --- PER FILE SUMMARY ---
+    n_pre_true = df_file_metrics['Registered_Pre'].sum()
+    tracked_df = df_file_metrics[(df_file_metrics['Registered_Pre'] == True) & (df_file_metrics['Registered_Acute'] == True)]
+    n_tracked, denom = len(tracked_df), (n_pre_true if n_pre_true > 0 else 1)
 
-# Filter for cells present in both (Tracked)
-tracked_df = df_metrics[(df_metrics['Registered_Pre'] == True) & (df_metrics['Registered_Acute'] == True)]
-n_tracked = len(tracked_df)
-n_missing = ((df_metrics['Registered_Pre'] == True) & (df_metrics['Registered_Acute'] == False)).sum()
-n_new = ((df_metrics['Registered_Pre'] == False) & (df_metrics['Registered_Acute'] == True)).sum()
+    summary_rows = [
+        [file_name, "Registered_Pre == True", n_pre_true, (n_pre_true/len(df_file_metrics)*100)],
+        [file_name, "All tracked cells (Pre=T, Acute=T)", n_tracked, (n_tracked/denom*100)],
+        [file_name, "Missing cells in acute (Pre=T, Acute=F)", ((df_file_metrics['Registered_Pre']==True) & (df_file_metrics['Registered_Acute']==False)).sum(), (((df_file_metrics['Registered_Pre']==True) & (df_file_metrics['Registered_Acute']==False)).sum()/denom*100)],
+        [file_name, "New cells (Pre=F, Acute=T)", ((df_file_metrics['Registered_Pre']==False) & (df_file_metrics['Registered_Acute']==True)).sum(), (((df_file_metrics['Registered_Pre']==False) & (df_file_metrics['Registered_Acute']==True)).sum()/denom*100)]
+    ]
+    analysis_cols = [c for c in df_file_metrics.columns if c.startswith("Difference_") or "DF/F" in c]
+    for col in analysis_cols:
+        vals = tracked_df[col].dropna()
+        up, down = (vals > 1e-9).sum(), (vals < -1e-9).sum()
+        unchanged = ((vals >= -1e-9) & (vals <= 1e-9)).sum()
+        summary_rows.append([file_name, f"{col} - Upregulated (+ve)", up, (up/n_tracked*100) if n_tracked > 0 else 0])
+        summary_rows.append([file_name, f"{col} - Downregulated (-ve)", down, (down/n_tracked*100) if n_tracked > 0 else 0])
+        summary_rows.append([file_name, f"{col} - Unchanged (0)", unchanged, (unchanged/n_tracked*100) if n_tracked > 0 else 0])
+    all_summaries_list.append(pd.DataFrame(summary_rows, columns=["Source_File", "Category", "Count", "Percentage (%)"]))
 
-# 1. Registration Statistics
-summary_rows.append(["All cells in file", total_all, 100.0])
-summary_rows.append(["Registered_Pre == True", n_pre_true, (n_pre_true / total_all * 100)])
-summary_rows.append(["Registered_Pre == False", n_pre_false, (n_pre_false / total_all * 100)])
+# --- CONSOLIDATION ---
+final_metrics_df = pd.concat(all_metrics_list, ignore_index=True)
+combined_summary_df = pd.concat(all_summaries_list, ignore_index=True)
 
-# Denominator for population ratios is "Registered_Pre == True"
-denom = n_pre_true if n_pre_true > 0 else 1
-summary_rows.append(["All tracked cells (Pre=T, Acute=T)", n_tracked, (n_tracked / denom * 100)])
-summary_rows.append(["Missing cells in acute (Pre=T, Acute=F)", n_missing, (n_missing / denom * 100)])
-summary_rows.append(["New cells (Pre=F, Acute=T)", n_new, (n_new / denom * 100)])
+# --- MEAN ± SD STATISTICS (across files) ---
+stats_rows = []
+# Filter out visual separators ("---") and headers from calculations
+calc_summary = combined_summary_df[~combined_summary_df['Category'].str.contains("Metric Group|---", na=False)]
+grouped = calc_summary.groupby('Category', sort=False)
 
-# 2. Directional Change Analysis for Tracked Cells
-# Includes columns starting with 'Difference_' AND 'DF/F'
-analysis_cols = [c for c in df_metrics.columns if c.startswith("Difference_") or "DF/F" in c]
+for cat, group in grouped:
+    m_count, s_count = group['Count'].mean(), group['Count'].std()
+    m_pct, s_pct = group['Percentage (%)'].mean(), group['Percentage (%)'].std()
+    stats_rows.append(["MEAN ± SD (All Files)", cat, f"{m_count:.2f} ± {s_count:.2f}", f"{m_pct:.2f} ± {s_pct:.2f}"])
 
+df_stats = pd.DataFrame(stats_rows, columns=["Source_File", "Category", "Count", "Percentage (%)"])
+
+# Append Stats to Combined Summary for easy viewing
+final_combined_summary_df = pd.concat([combined_summary_df, pd.DataFrame([["---"]*4], columns=combined_summary_df.columns), df_stats], ignore_index=True)
+
+# --- GLOBAL CONCLUSIVE SUMMARY ---
+# (Calculated by pooling all cells from all files first)
+global_pre_true = final_metrics_df['Registered_Pre'].sum()
+global_tracked_df = final_metrics_df[(final_metrics_df['Registered_Pre'] == True) & (final_metrics_df['Registered_Acute'] == True)]
+n_global_tracked, global_denom = len(global_tracked_df), (global_pre_true if global_pre_true > 0 else 1)
+
+global_rows = [
+    ["GLOBAL", "All Registered_Pre == True", global_pre_true, (global_pre_true/len(final_metrics_df)*100)],
+    ["GLOBAL", "All tracked cells (Pre=T, Acute=T)", n_global_tracked, (n_global_tracked/global_denom*100)]
+]
 for col in analysis_cols:
-    summary_rows.append(["---", "", ""])
-    summary_rows.append([f"Metric: {col}", "", ""])
-    
-    vals = tracked_df[col].dropna() # DF/F might contain NaNs if Pre was 0
-    up = (vals > 1e-9).sum()
-    down = (vals < -1e-9).sum()
+    vals = global_tracked_df[col].dropna()
+    up, down = (vals > 1e-9).sum(), (vals < -1e-9).sum()
     unchanged = ((vals >= -1e-9) & (vals <= 1e-9)).sum()
-    
-    # Percentages relative to the number of tracked cells
-    summary_rows.append([f"  {col} - Upregulated (+ve)", up, (up / n_tracked * 100) if n_tracked > 0 else 0])
-    summary_rows.append([f"  {col} - Downregulated (-ve)", down, (down / n_tracked * 100) if n_tracked > 0 else 0])
-    summary_rows.append([f"  {col} - Unchanged (0)", unchanged, (unchanged / n_tracked * 100) if n_tracked > 0 else 0])
+    global_rows.append(["GLOBAL", f"{col} - Upregulated (+ve)", up, (up/n_global_tracked*100) if n_global_tracked > 0 else 0])
+    global_rows.append(["GLOBAL", f"{col} - Downregulated (-ve)", down, (down/n_global_tracked*100) if n_global_tracked > 0 else 0])
+    global_rows.append(["GLOBAL", f"{col} - Unchanged (0)", unchanged, (unchanged/n_global_tracked*100) if n_global_tracked > 0 else 0])
 
-df_summary = pd.DataFrame(summary_rows, columns=["Category", "Count", "Percentage (%)"])
+final_global_summary_df = pd.DataFrame(global_rows, columns=["Source_File", "Category", "Count", "Percentage (%)"])
 
-# --- SAVE RESULTS ---
-input_dir = os.path.dirname(file_path)
-output_dir = os.path.join(input_dir, "Analysis_Results")
-if not os.path.exists(output_dir): 
-    os.makedirs(output_dir)
+# --- SAVE ---
+output_path = os.path.join(folder_path, "Consolidated_Global_Analysis_with_SD.xlsx")
+with pd.ExcelWriter(output_path) as writer:
+    final_metrics_df.to_excel(writer, sheet_name='All_Cell_Metrics', index=False)
+    final_combined_summary_df.to_excel(writer, sheet_name='Combined_Summary', index=False)
+    final_global_summary_df.to_excel(writer, sheet_name='Global_Summary', index=False)
 
-output_file = os.path.join(output_dir, "Detailed_Longitudinal_Summary.xlsx")
-
-with pd.ExcelWriter(output_file) as writer:
-    df_metrics.to_excel(writer, sheet_name='Cell_Metrics', index=False)
-    df_summary.to_excel(writer, sheet_name='Summary', index=False)
-
-print(f"\nDone! Results saved in: {output_file}")
+print(f"\nSuccess! File saved at: {output_path}")
