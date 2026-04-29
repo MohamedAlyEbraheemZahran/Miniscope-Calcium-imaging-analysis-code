@@ -9,8 +9,8 @@ from sklearn.metrics import roc_curve, auc
 # 🟢 CONFIGURATION
 # =============================================================================
 
-FOLDER_PATH_IMAGING = r"F:\inscopix_SOMcre\CSV files\pre\time"
-PATH_BEHAVIOR = r"F:\inscopix_SOMcre\behavior videos\behavior videos downsampled\pre\boris\pre_converted_boris_to_simba.csv"
+FOLDER_PATH_IMAGING = r" File path to Ca imaging data"
+PATH_BEHAVIOR = r"File path to behavior data"
 
 # ROC PARAMETERS
 BASELINE_START = 30
