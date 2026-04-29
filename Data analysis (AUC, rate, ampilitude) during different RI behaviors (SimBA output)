@@ -14,7 +14,7 @@ path_behavior = r"path to behavior data"
 MAX_RISE_SECONDS = 3.0      
 MIN_PROMINENCE = 0.03      
 MIN_WIDTH = 2               
-BASELINE_START = 60
+BASELINE_START = 30
 BASELINE_END = 300
 # -----------------------------------------------------------------------
 
