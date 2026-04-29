@@ -7,8 +7,8 @@ from datetime import datetime
 
 # 1. PATHS & CONFIGURATION
 # Adjust these paths as needed for your local environment
-folder_path_imaging = r"F:\inscopix_SOMcre\CSV files\pre\time"
-path_behavior = r"F:\inscopix_SOMcre\behavior videos\behavior videos downsampled\pre\boris\pre_converted_boris_to_simba.csv"
+folder_path_imaging = r"path to Ca imaging"
+path_behavior = r"path to behavior data"
 
 # ---- GOLD STANDARD PARAMETERS (Optimized for 10Hz GCaMP6f / SOM-MeA) ----
 MAX_RISE_SECONDS = 3.0      
