@@ -1,0 +1,162 @@
+import pandas as pd
+import numpy as np
+import os
+import glob
+from scipy.signal import find_peaks
+from datetime import datetime
+
+# 1. PATHS & CONFIGURATION
+# Adjust these paths as needed for your local environment
+folder_path_imaging = r"F:\inscopix_SOMcre\CSV files\pre\time"
+path_behavior = r"F:\inscopix_SOMcre\behavior videos\behavior videos downsampled\pre\boris\pre_converted_boris_to_simba.csv"
+
+# ---- GOLD STANDARD PARAMETERS (Optimized for 10Hz GCaMP6f / SOM-MeA) ----
+MAX_RISE_SECONDS = 3.0      
+MIN_PROMINENCE = 0.03      
+MIN_WIDTH = 2               
+BASELINE_START = 60
+BASELINE_END = 300
+# -----------------------------------------------------------------------
+
+category_map = {
+    'Attack': 'Offensive', 'Boxing': 'Offensive', 'Chase': 'Offensive', 'Lateral threat': 'Offensive',
+    'Defense': 'Defensive', 'Escape': 'Defensive', 'Freeze': 'Defensive',
+    'Anogenital': 'Social', 'Follow': 'Social', 'Nosing': 'Social', 'Allogroom': 'Social',
+    'self_Groom': 'Non-Social', 'Immobility': 'Non-Social', 'Rear': 'Non-Social', 'Digging': 'Non-Social'
+}
+
+# Load behavior data
+if not os.path.exists(path_behavior):
+    raise FileNotFoundError(f"Behavior file not found at: {path_behavior}")
+df_behavior = pd.read_csv(path_behavior)
+df_behavior['Category'] = df_behavior['Event'].map(category_map)
+
+# Setup Output Folder
+timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+output_folder = os.path.join(os.path.dirname(path_behavior), f"Behavior_Analysis_{timestamp}")
+if not os.path.exists(output_folder):
+    os.makedirs(output_folder)
+
+# Get imaging files
+files_imaging = [f for f in glob.glob(os.path.join(folder_path_imaging, "*.csv")) if "results" not in os.path.basename(f)]
+
+all_summary_results = []
+
+for file in files_imaging:
+    file_name = os.path.basename(file)
+    print(f"Processing: {file_name}")
+    
+    # Load Imaging Data (Handling the Cell Status row)
+    with open(file, 'r') as f:
+        header = f.readline()
+        second = f.readline()
+    
+    if any(s in second for s in ["accepted", "rejected", "undecided"]):
+        df_signal = pd.read_csv(file, header=0, skiprows=[1])
+    else:
+        df_signal = pd.read_csv(file, header=0)
+    
+    df_signal.columns = df_signal.columns.str.strip()
+    time_col = df_signal.columns[0]
+    df_signal[time_col] = pd.to_numeric(df_signal[time_col], errors="coerce")
+    
+    # Match ID (Mouse_Date)
+    parts = file_name.split('_')
+    rec_id = f"{parts[0]}_{parts[1]}"
+    
+    video_bouts = df_behavior[df_behavior['Video'].str.contains(rec_id, na=False)].copy()
+    if video_bouts.empty:
+        continue
+
+    # Sampling frequency and max rise steps
+    fs = 1 / np.mean(np.diff(df_signal[time_col].to_numpy()))
+    max_rise_indices = int(MAX_RISE_SECONDS * fs)
+    
+    cells = [c for c in df_signal.columns if c != time_col and "Unnamed" not in c and "Status" not in c]
+
+    for cell in cells:
+        full_signal = pd.to_numeric(df_signal[cell], errors="coerce").fillna(0).to_numpy()
+        full_time = df_signal[time_col].to_numpy()
+        
+        # --- 1. BASELINE CALCULATION (30-300s) ---
+        bl_mask = (full_time >= BASELINE_START) & (full_time <= BASELINE_END)
+        bl_sig = full_signal[bl_mask]
+        bl_t = full_time[bl_mask]
+        bl_duration = BASELINE_END - BASELINE_START
+        
+        bl_peaks, _ = find_peaks(bl_sig, prominence=MIN_PROMINENCE, width=MIN_WIDTH)
+        bl_aucs = []
+        for p in bl_peaks:
+            lookback = max(0, p - max_rise_indices)
+            start = p
+            while start > lookback and bl_sig[start-1] < bl_sig[start]:
+                start -= 1
+            bl_aucs.append(np.trapz(bl_sig[start:p+1], bl_t[start:p+1]))
+        
+        total_bl_auc = sum(bl_aucs)
+        bl_auc_per_sec = total_bl_auc / bl_duration if bl_duration > 0 else 0
+        
+        # --- 2. CATEGORY-SPECIFIC CALCULATIONS ---
+        unique_categories = video_bouts['Category'].dropna().unique()
+        for cat_name in unique_categories:
+            cat_bouts = video_bouts[video_bouts['Category'] == cat_name]
+            
+            cat_amps, cat_aucs, cat_durs = [], [], []
+            total_time_in_category = 0
+            
+            for _, bout in cat_bouts.iterrows():
+                t_start, t_end = bout['Start_time'], bout['End Time']
+                mask = (full_time >= t_start) & (full_time <= t_end)
+                
+                bout_sig = full_signal[mask]
+                bout_t = full_time[mask]
+                
+                if len(bout_sig) < MIN_WIDTH: continue
+                
+                peaks, _ = find_peaks(bout_sig, prominence=MIN_PROMINENCE, width=MIN_WIDTH)
+                
+                for p in peaks:
+                    lookback = max(0, p - max_rise_indices)
+                    start = p
+                    while start > lookback and bout_sig[start-1] < bout_sig[start]:
+                        start -= 1
+                    cat_amps.append(bout_sig[p])
+                    cat_aucs.append(np.trapz(bout_sig[start:p+1], bout_t[start:p+1]))
+                    cat_durs.append(bout_t[p] - bout_t[start])
+                
+                total_time_in_category += bout['Bout_time']
+
+            if total_time_in_category > 0:
+                total_auc_rise = sum(cat_aucs)
+                num_peaks = len(cat_amps)
+                auc_per_sec = total_auc_rise / total_time_in_category
+                
+                # --- CALCULATE ACTIVITY CHANGE ---
+                if bl_auc_per_sec > 0:
+                    activity_change = (auc_per_sec - bl_auc_per_sec) / bl_auc_per_sec
+                else:
+                    activity_change = np.nan
+                
+                all_summary_results.append({
+                    "File_ID": rec_id,
+                    "Cell": cell,
+                    "Behavior_Category": cat_name,
+                    "Num_Peaks": num_peaks,
+                    "Peak_Freq_Hz": num_peaks / total_time_in_category,
+                    "Mean_Peak_Amplitude": np.mean(cat_amps) if cat_amps else 0,
+                    "Total_AUC_Rise": total_auc_rise,
+                    "Mean_AUC_Rise": np.mean(cat_aucs) if cat_aucs else 0,
+                    "AUC_Per_Second": auc_per_sec,
+                    "Baseline_AUC_Per_Second": bl_auc_per_sec,
+                    "AUC_Activity_Change_from_Baseline": activity_change,
+                    "Mean_Rise_Duration(s)": np.mean(cat_durs) if cat_durs else 0,
+                    "Total_Category_Duration(s)": total_time_in_category,
+                    "Source_File": file_name
+                })
+
+# 5. Save Results
+if all_summary_results:
+    output_file = os.path.join(output_folder, f"GoldStandard_Behavior_Summary_{timestamp}.xlsx")
+    pd.DataFrame(all_summary_results).to_excel(output_file, index=False)
+    print(f"\n✅ SUCCESS!")
+    print(f"File saved: {output_file}")
