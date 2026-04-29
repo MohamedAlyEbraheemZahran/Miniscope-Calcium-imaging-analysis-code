@@ -1,0 +1,147 @@
+import pandas as pd
+import numpy as np
+import os
+import glob
+from datetime import datetime
+from sklearn.metrics import roc_curve, auc
+
+# =============================================================================
+# 🟢 CONFIGURATION
+# =============================================================================
+
+FOLDER_PATH_IMAGING = r"F:\inscopix_SOMcre\CSV files\pre\time"
+PATH_BEHAVIOR = r"F:\inscopix_SOMcre\behavior videos\behavior videos downsampled\pre\boris\pre_converted_boris_to_simba.csv"
+
+# ROC PARAMETERS
+BASELINE_START = 30
+BASELINE_END = 300
+ROC_WINDOW_SECONDS = 1.0      # ± seconds around behavior onset
+ROC_PERMUTATIONS = 200        # Iterations for p-value calculation
+ROC_PVAL_THRESHOLD = 0.05
+ROC_EFFECT_THRESHOLD = 0.1    # |AUC - 0.5| > 0.1 to be considered a selective encoder
+
+CATEGORY_MAP = {
+    'Attack': 'Offensive', 'Boxing': 'Offensive', 'Chase': 'Offensive',
+    'Lateral threat': 'Offensive', 'Lateral theat': 'Offensive',
+    'Defense': 'Defensive', 'Escape': 'Defensive', 'Freeze': 'Defensive',
+    'Anogenital': 'Social', 'Follow': 'Social', 'Nosing': 'Social', 'Allogroom': 'Social',
+    'Groom': 'Non-Social', 'Immobility': 'Non-Social', 'Rear': 'Non-Social', 'Digging': 'Non-Social'
+}
+
+# =============================================================================
+# 🔬 ROC COMPUTATION CORE
+# =============================================================================
+
+def compute_roc_auc(time_arr, signal_arr, behavior_bouts, 
+                    window=2.0, baseline_start=30, baseline_end=300,
+                    n_permutations=200):
+    
+    if len(behavior_bouts) == 0:
+        return None
+    
+    # 1. Extract Behavior Samples (Onset Window)
+    behavior_samples = []
+    for _, bout in behavior_bouts.iterrows():
+        t0, t1 = bout['Start_time'] - window, bout['Start_time'] + window
+        mask = (time_arr >= t0) & (time_arr <= t1)
+        behavior_samples.extend(signal_arr[mask])
+    
+    if len(behavior_samples) < 5: return None
+
+    # 2. Extract Baseline Samples (Excluding behavior times)
+    exclusion_mask = np.zeros_like(time_arr, dtype=bool)
+    for _, bout in behavior_bouts.iterrows():
+        exclusion_mask |= (time_arr >= bout['Start_time'] - 5) & (time_arr <= bout['End Time'] + 5)
+    
+    baseline_mask = (time_arr >= baseline_start) & (time_arr <= baseline_end) & ~exclusion_mask
+    baseline_samples = signal_arr[baseline_mask]
+    
+    if len(baseline_samples) < 5: return None
+
+    # 3. Balance Classes (Max 500 samples for speed)
+    n_samples = min(len(behavior_samples), len(baseline_samples), 500)
+    beh_sub = np.random.choice(behavior_samples, size=n_samples, replace=False)
+    bl_sub = np.random.choice(baseline_samples, size=n_samples, replace=False)
+    
+    # 4. Calculate Observed AUC
+    y_true = np.concatenate([np.ones(n_samples), np.zeros(n_samples)])
+    y_score = np.concatenate([beh_sub, bl_sub])
+    fpr, tpr, _ = roc_curve(y_true, y_score)
+    obs_auc = auc(fpr, tpr)
+    
+    # 5. Permutation Test
+    perm_aucs = []
+    for _ in range(n_permutations):
+        shuffled_y = np.random.permutation(y_true)
+        f, t, _ = roc_curve(shuffled_y, y_score)
+        perm_aucs.append(auc(f, t))
+    
+    p_val = (np.sum(np.abs(np.array(perm_aucs) - 0.5) >= abs(obs_auc - 0.5)) + 1) / (n_permutations + 1)
+    
+    return {'auc': obs_auc, 'p_val': p_val, 'n': n_samples}
+
+# =============================================================================
+# ⚙️ PROCESSING LOOP
+# =============================================================================
+
+def run_roc_analysis():
+    df_behavior = pd.read_csv(PATH_BEHAVIOR)
+    df_behavior['Category'] = df_behavior['Event'].map(CATEGORY_MAP)
+    files_imaging = [f for f in glob.glob(os.path.join(FOLDER_PATH_IMAGING, "*.csv")) if "results" not in f.lower()]
+    
+    results = []
+
+    for file in files_imaging:
+        file_name = os.path.basename(file)
+        # Handle status row if present
+        with open(file, 'r') as f:
+            header, second = f.readline(), f.readline()
+        skip = [1] if any(x in second.lower() for x in ["accepted", "rejected"]) else []
+        df_sig = pd.read_csv(file, skiprows=skip)
+        
+        time_arr = pd.to_numeric(df_sig.iloc[:, 0], errors='coerce').values
+        rec_id = "_".join(file_name.split('_')[:2])
+        video_bouts = df_behavior[df_behavior['Video'].str.contains(rec_id, na=False)]
+
+        cells = [c for c in df_sig.columns[1:] if "Unnamed" not in c and "Status" not in c]
+        
+        print(f"Processing {file_name} ({len(cells)} cells)...")
+
+        for cell in cells:
+            signal = pd.to_numeric(df_sig[cell], errors='coerce').fillna(0).values
+            
+            for cat in video_bouts['Category'].dropna().unique():
+                cat_bouts = video_bouts[video_bouts['Category'] == cat]
+                res = compute_roc_auc(time_arr, signal, cat_bouts, ROC_WINDOW_SECONDS, BASELINE_START, BASELINE_END, ROC_PERMUTATIONS)
+                
+                if res:
+                    # Classify
+                    is_sig = res['p_val'] < ROC_PVAL_THRESHOLD and abs(res['auc'] - 0.5) > ROC_EFFECT_THRESHOLD
+                    if not is_sig: enc = "Non-selective"
+                    else: enc = "Excited" if res['auc'] > 0.5 else "Suppressed"
+                    
+                    results.append({
+                        "File_ID": rec_id, "Cell": cell, "Category": cat,
+                        "AUC": res['auc'], "p_value": res['p_val'], 
+                        "Encoding": enc, "Samples": res['n']
+                    })
+
+    # Save Results
+    df_res = pd.DataFrame(results)
+    out_path = os.path.join(os.path.dirname(PATH_BEHAVIOR), f"ROC_ONLY_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx")
+    
+    # Create Summary
+    summary = df_res.groupby(['Category', 'Encoding']).size().unstack(fill_value=0)
+    summary['Total'] = summary.sum(axis=1)
+    for col in ['Excited', 'Suppressed', 'Non-selective']:
+        if col in summary:
+            summary[f'{col}%'] = (summary[col] / summary['Total'] * 100).round(1)
+
+    with pd.ExcelWriter(out_path) as writer:
+        df_res.to_excel(writer, sheet_name='All_Cells', index=False)
+        summary.to_excel(writer, sheet_name='Summary')
+    
+    print(f"✅ Done! Saved to: {out_path}")
+
+if __name__ == "__main__":
+    run_roc_analysis()
